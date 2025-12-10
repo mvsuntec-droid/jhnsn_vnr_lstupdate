@@ -3,222 +3,182 @@ import pandas as pd
 import numpy as np
 import io
 
-st.set_page_config(page_title="Buy Line → Vendor Name Mapper", layout="wide")
+st.set_page_config(page_title="Mapper", layout="wide")
 
-# ----------------------------------------
-# Session state: persistent mapping
-# ----------------------------------------
+# -------------------------------------------------
+# SIMPLE AUTH (USERNAME / PASSWORD)
+# -------------------------------------------------
+VALID_USERNAME = "matt"
+VALID_PASSWORD = "Interlynx123"
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.title("Mapper - Login")
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    login_btn = st.button("Login")
+
+    if login_btn:
+        if username == VALID_USERNAME and password == VALID_PASSWORD:
+            st.session_state.authenticated = True
+            st.experimental_rerun()
+        else:
+            st.error("Invalid username or password.")
+    # Stop here if not authenticated
+    st.stop()
+
+# -------------------------------------------------
+# FROM THIS POINT ON, USER IS AUTHENTICATED
+# -------------------------------------------------
+
+st.title("Mapper")
+
+# Session state for mapper ONLY (File 1).
+# We DO NOT store File 2 or the updated data in session_state.
 if "master_map" not in st.session_state:
-    # master_map will hold: [code_norm, Buy Line, Vendor Name]
     st.session_state.master_map = pd.DataFrame(
         columns=["code_norm", "Buy Line", "Vendor Name"]
     )
 
 
 # ----------------------------------------
-# Helper: normalize a Buy Line / code
+# NORMALIZE BUY LINE & MANUFACTURER CODES
 # ----------------------------------------
-def normalize_code(x):
+def normalize_code(value):
     """
-    Normalize buy-line / manufacturer codes to a comparable string.
-
-    - handles floats like 996539.0 -> "996539"
-    - handles strings like "12,945" -> "12945"
-    - handles strings like "046135" -> "46135"
-    - if not numeric, keeps the original string
+    Convert any numeric-like value to a clean comparable code.
+    Examples:
+        996539.0  → "996539"
+        "12,945"  → "12945"
+        "046135"  → "46135"
+        "782113"  → "782113"
     """
-    if pd.isna(x):
+    if pd.isna(value):
         return None
-    s = str(x).strip()
-    s = s.replace(",", "")  # remove thousand separators
+
+    s = str(value).strip()
+    s = s.replace(",", "")  # remove commas
+
     try:
-        val = int(float(s))
-        return str(val)
+        num = int(float(s))
+        return str(num)
     except Exception:
         return s
 
 
 # ----------------------------------------
-# Update master mapping from File 1
+# UPDATE MASTER MAPPING FROM FILE 1
 # ----------------------------------------
 def update_master_mapping(df_map: pd.DataFrame):
-    """
-    Update the in-memory master mapping using a mapping dataframe
-    that has columns: 'Buy Line', 'Vendor Name'.
-
-    If the same Buy Line appears multiple times (in current or past uploads),
-    the *last* occurrence wins.
-    """
     df_map = df_map.copy()
     df_map.columns = [c.strip() for c in df_map.columns]
 
     if "Buy Line" not in df_map.columns or "Vendor Name" not in df_map.columns:
-        st.error("Mapping file must contain columns: 'Buy Line' and 'Vendor Name'.")
+        st.error("File 1 must contain columns: 'Buy Line' and 'Vendor Name'.")
         return
 
     df_map = df_map.dropna(subset=["Buy Line"])
-
     df_map["code_norm"] = df_map["Buy Line"].apply(normalize_code)
-
     df_map = df_map[["code_norm", "Buy Line", "Vendor Name"]]
 
     combined = pd.concat([st.session_state.master_map, df_map], ignore_index=True)
-
     combined = combined.drop_duplicates(subset=["code_norm"], keep="last")
 
     st.session_state.master_map = combined
 
 
 # ----------------------------------------
-# Apply mapping to File 2
+# APPLY MAPPING TO FILE 2 (IN MEMORY ONLY)
 # ----------------------------------------
-def apply_mapping_to_file2(df2: pd.DataFrame) -> pd.DataFrame:
-    """
-    Replace manufacturer_Name in File 2 with Vendor Name using the master mapping.
-
-    - manufacturer_Name (codes) are normalized to code_norm.
-    - Master mapping uses code_norm -> Vendor Name.
-    - If match found, manufacturer_Name becomes Vendor Name.
-    - If no match, manufacturer_Name stays as original code.
-    """
-    if "manufacturer_Name" not in df2.columns:
-        st.error("File 2 must contain column 'manufacturer_Name'.")
-        return df2
-
-    master = st.session_state.master_map
-    if master.empty:
-        st.warning("Master mapping is empty – upload File 1 first.")
-        return df2
-
+def apply_mapping(df2: pd.DataFrame) -> pd.DataFrame:
     df2 = df2.copy()
+
+    if "manufacturer_Name" not in df2.columns:
+        st.error("File 2 must contain the column 'manufacturer_Name'.")
+        return df2
+
+    if st.session_state.master_map.empty:
+        st.error("Upload File 1 (mapper) first.")
+        return df2
 
     # Normalize codes in File 2
     df2["code_norm"] = df2["manufacturer_Name"].apply(normalize_code)
 
-    # Build mapping dict: code_norm -> Vendor Name
+    # Build dictionary from mapper: code_norm -> Vendor Name
     map_dict = pd.Series(
-        master["Vendor Name"].values, index=master["code_norm"]
+        st.session_state.master_map["Vendor Name"].values,
+        index=st.session_state.master_map["code_norm"],
     ).to_dict()
 
     # Map vendor names
-    df2["vendor_mapped"] = df2["code_norm"].map(map_dict)
+    df2["mapped_vendor"] = df2["code_norm"].map(map_dict)
 
-    # Where we have a vendor name, use it, otherwise keep original code
+    # Replace manufacturer_Name where mapping exists; otherwise keep original
     df2["manufacturer_Name"] = np.where(
-        df2["vendor_mapped"].notna(),
-        df2["vendor_mapped"],
+        df2["mapped_vendor"].notna(),
+        df2["mapped_vendor"],
         df2["manufacturer_Name"],
     )
 
-    # Drop helper columns
-    df2 = df2.drop(columns=["vendor_mapped", "code_norm"], errors="ignore")
+    # Remove helper columns so only clean data is in the export
+    df2 = df2.drop(columns=["mapped_vendor", "code_norm"], errors="ignore")
 
     return df2
 
 
-# ----------------------------------------
-# STREAMLIT UI
-# ----------------------------------------
-
-st.title("🔗 Buy Line → Vendor Name Mapper (Excel/CSV)")
-
-st.markdown(
-    """
-This tool uses **File 1 (REPORT_ODBC)** as a master mapping of **Buy Line → Vendor Name**
-and updates the **manufacturer_Name** column in **File 2** (your data file).
-
-- File 1 columns: **Buy Line**, **Vendor Name**  
-- File 2 must contain: **manufacturer_Name** (holding the Buy Line codes)  
-- If the same Buy Line appears multiple times in File 1, the **last entry wins**.
-"""
-)
-
-# ======================
-# STEP 1 – Upload File 1
-# ======================
-st.header("📘 Step 1 – Upload / Refresh Buy Line Mapping (File 1)")
+# ==========================
+# STEP 1 — LOAD MAPPER FILE
+# ==========================
+st.header("Step 1 – Upload Mapper File (File 1)")
 
 file1 = st.file_uploader(
-    "Upload REPORT_ODBC mapping file (Excel or CSV)",
+    "Upload mapper file (Buy Line / Vendor Name)",
     type=["xlsx", "xls", "csv"],
     key="file1",
 )
 
-if file1 is not None:
-    if file1.name.lower().endswith(".csv"):
-        df_map = pd.read_csv(file1)
-    else:
-        df_map = pd.read_excel(file1)
-
+if file1:
+    df_map = pd.read_csv(file1) if file1.name.lower().endswith(".csv") else pd.read_excel(file1)
     update_master_mapping(df_map)
-    st.success("Mapping file uploaded and master mapping updated.")
+    st.success("Mapper loaded.")
 
-st.subheader("Current Master Mapping (latest rows win per code)")
-if st.session_state.master_map.empty:
-    st.info("No mapping loaded yet.")
-else:
-    st.dataframe(st.session_state.master_map.head(50), use_container_width=True)
-
-
-# ======================
-# STEP 2 – Upload File 2
-# ======================
-st.header("📗 Step 2 – Upload Data File (File 2) to Update manufacturer_Name")
+# ==========================
+# STEP 2 — LOAD FILE 2
+# ==========================
+st.header("Step 2 – Upload Data File (File 2)")
 
 file2 = st.file_uploader(
-    "Upload File 2 (Excel or CSV – the data file with manufacturer_Name column)",
+    "Upload data file (contains manufacturer_Name column)",
     type=["xlsx", "xls", "csv"],
     key="file2",
 )
 
-if file2 is not None:
-    if file2.name.lower().endswith(".csv"):
-        df2 = pd.read_csv(file2)
-    else:
-        df2 = pd.read_excel(file2)
+if file2:
+    # File 2 stays ONLY in memory in this function scope
+    df2 = pd.read_csv(file2) if file2.name.lower().endswith(".csv") else pd.read_excel(file2)
 
-    st.write("### Preview of Uploaded File 2")
+    st.subheader("Preview of File 2")
     st.dataframe(df2.head(20), use_container_width=True)
 
-    if st.button("🔄 Apply Mapping to manufacturer_Name"):
-        updated_df = apply_mapping_to_file2(df2)
+    if st.button("Apply Mapping and Generate Updated File"):
+        updated_df = apply_mapping(df2)
 
-        st.success("Mapping applied! manufacturer_Name now shows Vendor Name where matched.")
-
-        st.write("### Updated File 2 Preview")
+        st.success("Mapping applied.")
+        st.subheader("Preview of Updated Data")
         st.dataframe(updated_df.head(20), use_container_width=True)
 
-        # Prepare Excel download
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            updated_df.to_excel(writer, index=False, sheet_name="UpdatedData")
-        buffer.seek(0)
+        # Export to Excel in-memory only
+        out_buffer = io.BytesIO()
+        with pd.ExcelWriter(out_buffer, engine="openpyxl") as writer:
+            updated_df.to_excel(writer, index=False, sheet_name="UpdatedFile")
+        out_buffer.seek(0)
 
         st.download_button(
-            label="⬇ Download Updated File 2 (Excel)",
-            data=buffer,
-            file_name="file2_manufacturer_mapped.xlsx",
+            label="Download Updated File",
+            data=out_buffer,
+            file_name="updated_file2_vendor_names.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-
-# ======================
-# STEP 3 – Download Master Mapping
-# ======================
-st.header("📄 Step 3 – Download Current Master Mapping")
-
-if st.session_state.master_map.empty:
-    st.info("No mapping to download yet.")
-else:
-    map_buffer = io.BytesIO()
-    with pd.ExcelWriter(map_buffer, engine="openpyxl") as writer:
-        st.session_state.master_map.to_excel(
-            writer, index=False, sheet_name="MasterMapping"
-        )
-    map_buffer.seek(0)
-
-    st.download_button(
-        label="⬇ Download Master Mapping (Excel)",
-        data=map_buffer,
-        file_name="master_buyline_vendor_mapping.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
