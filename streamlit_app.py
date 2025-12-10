@@ -23,18 +23,18 @@ def normalize_code(x):
     Normalize buy-line / manufacturer codes to a comparable string.
 
     - handles floats like 996539.0 -> "996539"
+    - handles strings like "12,945" -> "12945"
     - handles strings like "046135" -> "46135"
     - if not numeric, keeps the original string
     """
     if pd.isna(x):
         return None
     s = str(x).strip()
+    s = s.replace(",", "")  # remove thousand separators
     try:
-        # Convert numeric-looking values to int -> string
         val = int(float(s))
         return str(val)
     except Exception:
-        # Not numeric: just return as stripped string
         return s
 
 
@@ -49,7 +49,6 @@ def update_master_mapping(df_map: pd.DataFrame):
     If the same Buy Line appears multiple times (in current or past uploads),
     the *last* occurrence wins.
     """
-    # Normalize input columns
     df_map = df_map.copy()
     df_map.columns = [c.strip() for c in df_map.columns]
 
@@ -57,19 +56,14 @@ def update_master_mapping(df_map: pd.DataFrame):
         st.error("Mapping file must contain columns: 'Buy Line' and 'Vendor Name'.")
         return
 
-    # Drop completely empty rows in Buy Line
     df_map = df_map.dropna(subset=["Buy Line"])
 
-    # Add normalized code
     df_map["code_norm"] = df_map["Buy Line"].apply(normalize_code)
 
-    # Prepare clean mapping dataframe
     df_map = df_map[["code_norm", "Buy Line", "Vendor Name"]]
 
-    # Combine with existing master
     combined = pd.concat([st.session_state.master_map, df_map], ignore_index=True)
 
-    # Keep only the last record per code_norm (latest upload wins)
     combined = combined.drop_duplicates(subset=["code_norm"], keep="last")
 
     st.session_state.master_map = combined
@@ -91,37 +85,35 @@ def apply_mapping_to_file2(df2: pd.DataFrame) -> pd.DataFrame:
         st.error("File 2 must contain column 'manufacturer_Name'.")
         return df2
 
-    df2 = df2.copy()
-
-    # Normalize manufacturer_Name into code_norm
-    df2["code_norm"] = df2["manufacturer_Name"].apply(normalize_code)
-
     master = st.session_state.master_map
-
     if master.empty:
         st.warning("Master mapping is empty – upload File 1 first.")
         return df2
 
-    # Merge
-    merged = df2.merge(
-        master[["code_norm", "Vendor Name"]],
-        how="left",
-        on="code_norm",
-    )
+    df2 = df2.copy()
 
-    # Replace manufacturer_Name:
-    # - where we have a Vendor Name, use that
-    # - otherwise keep original manufacturer_Name
-    merged["manufacturer_Name"] = np.where(
-        merged["Vendor Name"].notna(),
-        merged["Vendor Name"],
-        merged["manufacturer_Name"],
+    # Normalize codes in File 2
+    df2["code_norm"] = df2["manufacturer_Name"].apply(normalize_code)
+
+    # Build mapping dict: code_norm -> Vendor Name
+    map_dict = pd.Series(
+        master["Vendor Name"].values, index=master["code_norm"]
+    ).to_dict()
+
+    # Map vendor names
+    df2["vendor_mapped"] = df2["code_norm"].map(map_dict)
+
+    # Where we have a vendor name, use it, otherwise keep original code
+    df2["manufacturer_Name"] = np.where(
+        df2["vendor_mapped"].notna(),
+        df2["vendor_mapped"],
+        df2["manufacturer_Name"],
     )
 
     # Drop helper columns
-    merged = merged.drop(columns=["Vendor Name", "code_norm"], errors="ignore")
+    df2 = df2.drop(columns=["vendor_mapped", "code_norm"], errors="ignore")
 
-    return merged
+    return df2
 
 
 # ----------------------------------------
@@ -132,7 +124,7 @@ st.title("🔗 Buy Line → Vendor Name Mapper (Excel/CSV)")
 
 st.markdown(
     """
-This tool uses **File 1 (REPORT_ODBC)** as a master mapping of **Buy Line → Vendor Name**  
+This tool uses **File 1 (REPORT_ODBC)** as a master mapping of **Buy Line → Vendor Name**
 and updates the **manufacturer_Name** column in **File 2** (your data file).
 
 - File 1 columns: **Buy Line**, **Vendor Name**  
