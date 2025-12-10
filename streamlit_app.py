@@ -24,10 +24,12 @@ if not st.session_state.authenticated:
     if login_btn:
         if username == VALID_USERNAME and password == VALID_PASSWORD:
             st.session_state.authenticated = True
-            st.experimental_rerun()
+            # Use st.rerun() (not experimental_rerun) to restart the script
+            st.rerun()
         else:
             st.error("Invalid username or password.")
-    # Stop here if not authenticated
+
+    # Stop execution if not authenticated
     st.stop()
 
 # -------------------------------------------------
@@ -36,8 +38,7 @@ if not st.session_state.authenticated:
 
 st.title("Mapper")
 
-# Session state for mapper ONLY (File 1).
-# We DO NOT store File 2 or the updated data in session_state.
+# Store ONLY the mapper (File 1) in session state
 if "master_map" not in st.session_state:
     st.session_state.master_map = pd.DataFrame(
         columns=["code_norm", "Buy Line", "Vendor Name"]
@@ -108,13 +109,13 @@ def apply_mapping(df2: pd.DataFrame) -> pd.DataFrame:
     df2["code_norm"] = df2["manufacturer_Name"].apply(normalize_code)
 
     # Build dictionary from mapper: code_norm -> Vendor Name
-    map_dict = pd.Series(
+    mapping_dict = pd.Series(
         st.session_state.master_map["Vendor Name"].values,
         index=st.session_state.master_map["code_norm"],
     ).to_dict()
 
     # Map vendor names
-    df2["mapped_vendor"] = df2["code_norm"].map(map_dict)
+    df2["mapped_vendor"] = df2["code_norm"].map(mapping_dict)
 
     # Replace manufacturer_Name where mapping exists; otherwise keep original
     df2["manufacturer_Name"] = np.where(
@@ -157,7 +158,7 @@ file2 = st.file_uploader(
 )
 
 if file2:
-    # File 2 stays ONLY in memory in this function scope
+    # File 2 is processed only in memory
     df2 = pd.read_csv(file2) if file2.name.lower().endswith(".csv") else pd.read_excel(file2)
 
     st.subheader("Preview of File 2")
